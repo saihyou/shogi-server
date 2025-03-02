@@ -28,6 +28,7 @@ $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), ".."))
 require 'shogi_server'
 require 'logger'
 require 'socket'
+require 'timeout'
 
 # Global variables
 
@@ -308,6 +309,14 @@ class BridgeState
         @increment = $1.to_i * 1000
       when /^([\+\-]\d{4}\w{2}),T(\d+)/
         csa  = $1
+        msec = $2.to_i * 1000
+        if csa[0..0] == "+"
+          @black_time = [@black_time + @increment - msec, 0].max
+          log_info("black_time=#{@black_time}")
+        else
+          @white_time = [@white_time + @increment - msec, 0].max
+          log_info("white_time=#{@white_time}")
+        end
         state1, usi = @csaToUsi.next(csa)
         @usiToCsa.next(usi)
       end
@@ -321,7 +330,11 @@ class BridgeState
   def event_game_summary
     assert_GAME_WAITING_CSA
 
-    str = recv_until($server, /^END Game_Summary/)
+    begin
+      str = recv_until($server, /^END Game_Summary/, timeout: 5)
+    rescue Timeout::Error
+      return
+    end
     log_server_recv str
 
     parse_game_summary(str)
@@ -563,14 +576,20 @@ class BridgeState
   end
 end # class BridgeState
 
-def recv_until(io, regexp)
-  lines = []
-  while line = io.gets
-    #puts "=== #{line}"
-    lines << line
-    break if regexp =~ line
+def recv_until(io, regexp, timeout: 60)
+  buf = ""
+  Timeout.timeout(timeout) do
+    begin
+      while line = io.read_nonblock(1024)
+        buf += line
+        break if regexp =~ buf
+      end
+    rescue IO::WaitReadable
+      IO.select([io])
+      retry
+    end
   end
-  return lines.join("")
+  return buf
 end
 
 def engine_puts(str)
